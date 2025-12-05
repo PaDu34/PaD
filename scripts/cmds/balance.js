@@ -1,85 +1,25 @@
-// balance.js
 const fs = require("fs");
 const path = require("path");
-const { createCanvas, loadImage } = require("canvas");
-const axios = require("axios");
-const { MongoClient } = require("mongodb");
+const { createCanvas, loadImage } = require('canvas');
+const axios = require('axios');
 
-/**
- * REQUIRED:
- * Set environment variable MONGO_URI to your MongoDB connection string.
- * Example: mongodb+srv://user:pass@cluster0.mongodb.net/?retryWrites=true&w=majority
- */
+const balanceFile = __dirname + "/coinxbalance.json";
 
-const MONGO_URI = process.env.MONGO_URI || ""; // set this in Render env vars
-const DB_NAME = process.env.DB_NAME || "goatbot";
-const COLLECTION = process.env.COLLECTION || "balances";
-
-if (!MONGO_URI) {
-  console.error("MONGO_URI is not set. Please set environment variable MONGO_URI");
-  // Do not crash — but DB ops will fail gracefully.
+if (!fs.existsSync(balanceFile)) {
+  fs.writeFileSync(balanceFile, JSON.stringify({}, null, 2));
 }
 
-// Keep global client to reuse across hot-reloads
-let mongoClient = global._mongoClient;
-let db = global._mongoDb;
-
-async function ensureDb() {
-  if (db && mongoClient && mongoClient.topology && mongoClient.topology.isDestroyed !== true) return { mongoClient, db };
-  if (!MONGO_URI) throw new Error("MONGO_URI not configured");
-
-  mongoClient = new MongoClient(MONGO_URI, { maxPoolSize: 10 });
-  await mongoClient.connect();
-  db = mongoClient.db(DB_NAME);
-  // save globally (helps with hot reload in some hosts)
-  global._mongoClient = mongoClient;
-  global._mongoDb = db;
-
-  // ensure index on _id (user id) if not exists (mongodb creates _id by default)
-  const col = db.collection(COLLECTION);
-  await col.createIndex({ _id: 1 }, { unique: true });
-
-  return { mongoClient, db };
+function getBalance(userID) {
+  const data = JSON.parse(fs.readFileSync(balanceFile));
+  if (data[userID]?.balance != null) return data[userID].balance;
+  if (userID === "100078049308655") return 10000;
+  return 100;
 }
 
-// ----------------- Helpers -----------------
-async function getUserDoc(userID) {
-  try {
-    await ensureDb();
-    const col = db.collection(COLLECTION);
-    const doc = await col.findOne({ _id: userID });
-    if (!doc) {
-      // create initial
-      const initial = { _id: userID, balance: 100, lastClaim: null };
-      await col.insertOne(initial);
-      return initial;
-    }
-    return doc;
-  } catch (e) {
-    console.error("DB getUserDoc error:", e);
-    // Fallback to in-memory default (non-persistent)
-    return { _id: userID, balance: 100, lastClaim: null };
-  }
-}
-
-async function setBalance(userID, newBalance) {
-  try {
-    await ensureDb();
-    const col = db.collection(COLLECTION);
-    await col.updateOne({ _id: userID }, { $set: { balance: newBalance } }, { upsert: true });
-  } catch (e) {
-    console.error("DB setBalance error:", e);
-  }
-}
-
-async function updateLastClaim(userID, when = new Date()) {
-  try {
-    await ensureDb();
-    const col = db.collection(COLLECTION);
-    await col.updateOne({ _id: userID }, { $set: { lastClaim: when } }, { upsert: true });
-  } catch (e) {
-    console.error("DB updateLastClaim error:", e);
-  }
+function setBalance(userID, balance) {
+  const data = JSON.parse(fs.readFileSync(balanceFile));
+  data[userID] = { balance };
+  fs.writeFileSync(balanceFile, JSON.stringify(data, null, 2));
 }
 
 function formatBalance(num) {
@@ -90,25 +30,17 @@ function formatBalance(num) {
   return num + "$";
 }
 
-function msToHrsMins(ms) {
-  if (ms <= 0) return "0h 0m";
-  const h = Math.floor(ms / 3600000);
-  const m = Math.floor((ms % 3600000) / 60000);
-  return `${h}h ${m}m`;
-}
-
-// ----------------- Exported Command -----------------
 module.exports.config = {
   name: "balance",
   aliases: ["bal"],
-  version: "3.0",
-  author: "MOHAMMAD AKASH + MIGRATED",
+  version: "1.0",
+  author: "MOHAMMAD AKASH + Unlimited Patch by ChatGPT",
   countDown: 5,
   role: 0,
-  shortDescription: "Balance card with MongoDB persistence",
+  shortDescription: "Bank card style balance",
   category: "game",
   guide: {
-    en: "{p}balance\n{p}balance claim\n{p}balance transfer @mention <amount>"
+    en: "{p}balance\n{p}balance transfer @mention <amount>\n{p}balance add <amount>"
   }
 };
 
@@ -116,122 +48,180 @@ module.exports.onStart = async function ({ api, event, args, usersData }) {
   const { threadID, senderID, messageID, mentions } = event;
 
   try {
-    // --- TRANSFER ---
+
+    // ===========================
+    //  🔥 Unlimited Money Add
+    // ===========================
+    if (args[0] && args[0].toLowerCase() === "add") {
+      const amount = parseInt(args[1]);
+
+      if (!amount || amount <= 0)
+        return api.sendMessage("Invalid amount.", threadID, messageID);
+
+      let bal = getBalance(senderID);
+      bal += amount;
+      setBalance(senderID, bal);
+
+      return api.sendMessage(
+        `💸 Added Successfully!\nNew Balance: ${formatBalance(bal)}`,
+        threadID,
+        messageID
+      );
+    }
+
+    // ===========================
+    //  Transfer System
+    // ===========================
     if (args[0] && args[0].toLowerCase() === "transfer") {
-      if (!mentions || Object.keys(mentions).length === 0) {
-        return api.sendMessage("Please mention someone to transfer to.", threadID, messageID);
-      }
+      if (!mentions || Object.keys(mentions).length === 0)
+        return api.sendMessage("Please mention someone.", threadID, messageID);
+
       const targetID = Object.keys(mentions)[0];
       const amount = parseInt(args[1]);
-      if (isNaN(amount) || amount <= 0) return api.sendMessage("Invalid amount.", threadID, messageID);
+      if (isNaN(amount) || amount <= 0)
+        return api.sendMessage("Invalid amount.", threadID, messageID);
 
-      const senderDoc = await getUserDoc(senderID);
-      if ((senderDoc.balance || 0) < amount) return api.sendMessage("Not enough balance.", threadID, messageID);
+      let senderBal = getBalance(senderID);
+      if (senderBal < amount)
+        return api.sendMessage("Not enough balance.", threadID, messageID);
 
-      const receiverDoc = await getUserDoc(targetID);
-      await setBalance(senderID, (senderDoc.balance || 0) - amount);
-      await setBalance(targetID, (receiverDoc.balance || 0) + amount);
+      let receiverBal = getBalance(targetID);
+      senderBal -= amount;
+      receiverBal += amount;
+      setBalance(senderID, senderBal);
+      setBalance(targetID, receiverBal);
 
       const senderName = await usersData.getName(senderID);
       const receiverName = await usersData.getName(targetID);
 
       return api.sendMessage(
-        `✅ Transfer Successful!\n${senderName} → ${receiverName}: ${formatBalance(amount)}\nYour balance: ${formatBalance((senderDoc.balance || 0) - amount)}`,
+        `Transfer Successful!\n${senderName} → ${receiverName}: ${formatBalance(amount)}\nYour balance: ${formatBalance(senderBal)}`,
         threadID, messageID
       );
     }
 
-    // --- CLAIM ---
-    if (args[0] && args[0].toLowerCase() === "claim") {
-      const doc = await getUserDoc(senderID);
-      const last = doc.lastClaim ? new Date(doc.lastClaim) : null;
-      const now = new Date();
-      const DAY = 24 * 3600 * 1000;
-      if (!last || (now - last) >= DAY) {
-        // give 100
-        const newBal = (doc.balance || 0) + 100;
-        await setBalance(senderID, newBal);
-        await updateLastClaim(senderID, now);
-        return api.sendMessage(`🎉 You claimed 100$ daily reward.\nCurrent balance: ${formatBalance(newBal)}`, threadID, messageID);
-      } else {
-        const left = DAY - (now - last);
-        return api.sendMessage(`⛔ Already claimed today. Next claim in ${msToHrsMins(left)}.`, threadID, messageID);
-      }
-    }
-
-    // --- SHOW BALANCE CARD ---
-    const doc = await getUserDoc(senderID);
-    const balance = doc.balance || 0;
-    const formatted = formatBalance(balance);
+    // ===========================
+    //  Balance Card System
+    // ===========================
+    const balance = getBalance(senderID);
     const userName = await usersData.getName(senderID);
+    const formatted = formatBalance(balance);
 
-    // Attempt to fetch avatar (best-effort)
+    const picUrl = `https://graph.facebook.com/${senderID}/picture?height=500&width=500&access_token=6628568379%7Cc1e620fa708a1d5696fb991c1bde5662`;
+
     let avatar = null;
-    const picUrl = `https://graph.facebook.com/${senderID}/picture?height=500&width=500`;
     try {
-      const res = await axios({ url: picUrl, responseType: "arraybuffer", timeout: 5000 });
+      const res = await axios({ url: picUrl, responseType: 'arraybuffer' });
       avatar = await loadImage(res.data);
-    } catch (e) {
-      // ignore if avatar fail
-    }
+    } catch (e) {}
 
-    // Build canvas card (same idea as before)
-    const width = 850, height = 540;
+    const width = 850;
+    const height = 540;
     const canvas = createCanvas(width, height);
-    const ctx = canvas.getContext("2d");
+    const ctx = canvas.getContext('2d');
 
-    // Background gradient
     const grad = ctx.createLinearGradient(0, 0, width, height);
-    grad.addColorStop(0, '#0f0c29'); grad.addColorStop(0.5, '#302b63'); grad.addColorStop(1, '#24243e');
-    ctx.fillStyle = grad; roundRect(ctx, 0, 0, width, height, 35, true);
+    grad.addColorStop(0, '#0f0c29');
+    grad.addColorStop(0.5, '#302b63');
+    grad.addColorStop(1, '#24243e');
+    ctx.fillStyle = grad;
+    roundRect(ctx, 0, 0, width, height, 35, true);
 
-    // Glass overlay
-    ctx.fillStyle = 'rgba(255,255,255,0.06)'; roundRect(ctx, 20, 20, width - 40, height - 40, 30, true);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.08)';
+    roundRect(ctx, 20, 20, width - 40, height - 40, 30, true);
 
-    // Avatar
     if (avatar) {
-      const size = 130;
-      const x = width - size - 60;
+      const size = 110;
+      const x = width - size - 50;
       const y = 50;
       ctx.save();
       ctx.beginPath();
-      ctx.arc(x + size / 2, y + size / 2, size/2, 0, Math.PI*2);
+      ctx.arc(x + size/2, y + size/2, size/2, 0, Math.PI * 2);
       ctx.clip();
       ctx.drawImage(avatar, x, y, size, size);
       ctx.restore();
 
-      ctx.strokeStyle = '#00ff88'; ctx.lineWidth = 4;
+      ctx.strokeStyle = '#00ff88';
+      ctx.lineWidth = 4;
       ctx.beginPath();
-      ctx.arc(x + size/2, y + size/2, size/2 + 3, 0, Math.PI*2); ctx.stroke();
+      ctx.arc(x + size/2, y + size/2, size/2 + 2, 0, Math.PI * 2);
+      ctx.stroke();
     }
 
-    ctx.font = 'bold 40px "Segoe UI"'; ctx.fillStyle = '#00d4ff';
+    ctx.font = 'bold 38px "Segoe UI"';
+    ctx.fillStyle = '#00d4ff';
     ctx.fillText('GOAT BANK', 60, 100);
 
-    ctx.font = '28px "Segoe UI"'; ctx.fillStyle = '#ffffff';
-    ctx.fillText(userName.toUpperCase(), 60, 180);
+    ctx.font = '32px monospace';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText('•••• •••• •••• 8456', 60, 180);
 
-    ctx.font = 'bold 56px "Segoe UI"'; ctx.fillStyle = '#ffffff';
-    ctx.fillText(formatted, 60, 260);
+    ctx.font = 'bold 30px "Segoe UI"';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(userName.toUpperCase(), 60, 250);
 
-    // Save to cache and send
+    ctx.font = '22px "Segoe UI"';
+    ctx.fillStyle = '#cccccc';
+    ctx.fillText('VALID THRU', 60, 310);
+    ctx.font = '28px "Segoe UI"';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText('12/28', 60, 350);
+
+    ctx.fillStyle = 'rgba(0, 212, 255, 0.15)';
+    roundRect(ctx, 450, 180, 330, 180, 25, true);
+
+    ctx.fillStyle = '#00d4ff';
+    ctx.font = 'bold 26px "Segoe UI"';
+    ctx.textAlign = 'center';
+    ctx.fillText('AVAILABLE BALANCE', 615, 230);
+
+    ctx.font = 'bold 56px "Segoe UI"';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(formatted, 615, 310);
+
+    ctx.textAlign = 'left';
+
+    ctx.fillStyle = '#f4d03f';
+    roundRect(ctx, 60, 400, 90, 65, 10, true);
+
+    const chipPattern = [
+      [15, 15], [45, 15], [75, 15],
+      [15, 35], [45, 35], [75, 35],
+      [15, 55], [45, 55], [75, 55]
+    ];
+    ctx.fillStyle = '#b7950b';
+    chipPattern.forEach(([px, py]) => {
+      ctx.fillRect(60 + px, 400 + py, 15, 15);
+    });
+
+    ctx.font = 'bold 48px Arial';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText('VISA', 180, 450);
+
+    drawContactless(ctx, 300, 430);
+
     const buffer = canvas.toBuffer('image/png');
-    const filePath = path.join(__dirname, 'cache', `balance_${senderID}.png`);
-    if (!fs.existsSync(path.join(__dirname, 'cache'))) fs.mkdirSync(path.join(__dirname, 'cache'), { recursive: true });
+    const filePath = path.join(__dirname, 'cache', 'balance_perfect.png');
+
+    if (!fs.existsSync(path.join(__dirname, 'cache'))) {
+      fs.mkdirSync(path.join(__dirname, 'cache'), { recursive: true });
+    }
+
     fs.writeFileSync(filePath, buffer);
 
-    await api.sendMessage({ body: "", attachment: fs.createReadStream(filePath) }, threadID, messageID);
+    await api.sendMessage({
+      body: "",
+      attachment: fs.createReadStream(filePath)
+    }, threadID, messageID);
 
-    // cleanup after short delay
-    setTimeout(() => { try { fs.unlinkSync(filePath); } catch (e) {} }, 8 * 1000);
+    setTimeout(() => fs.unlinkSync(filePath), 10000);
 
-  } catch (err) {
-    console.error("balance command error:", err);
-    return api.sendMessage("Error processing balance command. Check bot logs.", event.threadID, event.messageID);
+  } catch (error) {
+    console.error(error);
+    api.sendMessage("Error generating card!", threadID, messageID);
   }
 };
 
-// ---------- small helper ----------
 function roundRect(ctx, x, y, w, h, r, fill = false, stroke = false) {
   ctx.beginPath();
   ctx.moveTo(x + r, y);
@@ -246,4 +236,14 @@ function roundRect(ctx, x, y, w, h, r, fill = false, stroke = false) {
   ctx.closePath();
   if (fill) ctx.fill();
   if (stroke) ctx.stroke();
+}
+
+function drawContactless(ctx, x, y) {
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 3;
+  for (let i = 1; i <= 4; i++) {
+    ctx.beginPath();
+    ctx.arc(x, y, 15 * i, -Math.PI / 3, Math.PI / 3);
+    ctx.stroke();
+  }
 }
