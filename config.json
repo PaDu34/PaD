@@ -29,7 +29,7 @@
     ]
   },
   "nickNameBot": "Friday",
-  "prefix": "*",
+  "prefix": "/",
   "database": {
     "type": "sqlite",
     "uriMongodb": "",
